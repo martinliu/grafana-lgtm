@@ -1,4 +1,4 @@
-# grafana-lgtm 一键启动测试环境
+# Grafana LGTM 增强版一键启动测试环境
 
 本项目基于 Docker Compose，集成了指标、日志、Trace、数据库与可视化，适合本地开发与测试。
 
