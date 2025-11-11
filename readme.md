@@ -23,6 +23,12 @@ cd grafana-lgtm
 docker compose up -d
 ```
 
+
+### 初始化 ClickHouse 数据库（可选）
+
+```bash
+docker exec -i clickhouse clickhouse-client -n < clickhouse-bootstrap.sql
+
 ## 访问入口
 
 - Grafana: [http://localhost:3000](http://localhost:3000)  （默认账号：admin/admin）

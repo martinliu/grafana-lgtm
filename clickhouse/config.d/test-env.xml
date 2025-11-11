@@ -5,6 +5,7 @@
   <!-- 端口（与 compose 中映射一致） -->
   <http_port>8123</http_port>
   <tcp_port>9000</tcp_port>
+  <tcp_port>9363</tcp_port>
 
   <!-- 日志输出到控制台，便于 docker logs 查看 -->
   <logger>

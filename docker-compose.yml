@@ -13,12 +13,21 @@ services:
   clickhouse:
     image: *clickhouse_image
     container_name: clickhouse
+    platform: linux/arm64    # M1/Apple Silicon 建议显式声明
+    environment:
+      - CLICKHOUSE_USER=admin                 # 建议改为自己的
+      - CLICKHOUSE_PASSWORD=admin_pass        # 建议改为强密码
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
     ports:
       - "8123:8123"   # HTTP
       - "9000:9000"   # Native
+      - "9363:9363"   # Prometheus /metrics
     volumes:
-      - clickhouse-data:/var/lib/clickhouse                              # 数据目录
-      - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro       # 外置配置（按需扩展）
+      - clickhouse-data:/var/lib/clickhouse
+      # 保持 config.d 只读没问题（放 prometheus.xml 的目录）
+      - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
+      # 关键：单独挂 users.d，必须可写（不要加 :ro）
+      - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
@@ -26,6 +35,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
 
   # 指标采集与查询（Prometheus）
   # - 暴露 9090；保留期 90 天（2160h）；数据目录持久化至命名卷

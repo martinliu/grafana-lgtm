@@ -27,9 +27,9 @@ datasources:
       server: clickhouse
       port: 8123
       protocol: http
-      username: default
+      username: grafana
       tlsAuth: false
       tlsSkipVerify: true
-      defaultDatabase: default
+      defaultDatabase: system
     secureJsonData:
-      password: ""
+      password: "StrongPass123!"
