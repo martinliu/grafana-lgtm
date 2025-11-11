@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s            # Scraping interval, shortened to 5 seconds to get data faster (default is 1m)
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['prometheus:9090']       # Scrape Prometheus itself so you have data even without OTEL
+
+  - job_name: 'node_macos'
+    static_configs:
+      - targets: ['host.docker.internal:9100','192.168.31.6:9100']    # Docker Desktop: scrape node_exporter running on host

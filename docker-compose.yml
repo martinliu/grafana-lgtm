@@ -1,0 +1,162 @@
+x-versions:  # 镜像版本统一在此管理，便于后续独立升级
+  prometheus: &prometheus_image prom/prometheus:v3.7.3
+  loki:       &loki_image       grafana/loki:3.5.7
+  tempo:      &tempo_image      grafana/tempo:2.9.0
+  grafana:    &grafana_image    grafana/grafana:12.2.1
+  promtail:   &promtail_image   grafana/promtail:3.5.7
+  clickhouse: &clickhouse_image clickhouse/clickhouse-server:24.8
+
+services:
+
+  # 列式数据库（ClickHouse）
+  # - 暴露 8123（HTTP）、9000（原生）；数据持久化到命名卷
+  clickhouse:
+    image: *clickhouse_image
+    container_name: clickhouse
+    ports:
+      - "8123:8123"   # HTTP
+      - "9000:9000"   # Native
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse                              # 数据目录
+      - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro       # 外置配置（按需扩展）
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # 指标采集与查询（Prometheus）
+  # - 暴露 9090；保留期 90 天（2160h）；数据目录持久化至命名卷
+  prometheus:
+    image: *prometheus_image
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro  # 外置 Prometheus 配置
+      - prometheus-data:/prometheus                        # 持久化 TSDB 数据
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    command: [
+      "--config.file=/etc/prometheus/prometheus.yml",
+      "--storage.tsdb.path=/prometheus",
+      "--storage.tsdb.retention.time=2160h"
+    ]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/ready > /dev/null 2>&1"]  # 依赖镜像自带 wget；无则可改为 curl
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # 日志存储（Loki）
+  # - 暴露 3100；数据目录持久化；全局保留期在 loki-local-config.yaml 中配置（已设 90 天）
+  loki:
+    image: *loki_image
+    container_name: loki
+    user: "0:0"  # 以 root 运行，便于写入本地数据目录
+    volumes:
+      - ./loki-local-config.yaml:/etc/loki/local-config.yaml:ro  # 外置 Loki 配置
+      - loki-data:/tmp/loki                                     # 持久化 Loki 数据
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready > /dev/null 2>&1"]  # 就绪探针
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Trace 存储（Tempo）
+  # - 暴露 3200（查询）与 4318（OTLP HTTP 接收）；数据目录持久化；保留期已设 90 天
+  tempo:
+    image: *tempo_image
+    container_name: tempo
+    user: "0:0"  # 以 root 运行，便于写入本地数据目录
+    volumes:
+      - ./tempo-local.yaml:/etc/tempo/tempo-local.yaml:ro  # 外置 Tempo 配置
+      - tempo-data:/tmp/tempo                             # 持久化 Tempo 数据
+    command: ["-config.file=/etc/tempo/tempo-local.yaml"]
+    ports:
+      - "3200:3200"   # 查询 HTTP 端口
+      - "4318:4318"   # OTLP HTTP 采集端口（宿主机→容器）
+    restart: unless-stopped
+
+  # 可视化（Grafana）
+  # - 暴露 3000；数据目录持久化；加载 custom.ini 与预置的数据源/看板
+  grafana:
+    image: *grafana_image
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin 
+      - GF_SECURITY_ADMIN_PASSWORD=admin 
+      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource  # 安装 ClickHouse 数据源插件
+    volumes:
+      - ./grafana/custom.ini:/etc/grafana/grafana.ini:ro  # 覆盖默认 grafana.ini
+      - grafana-data:/var/lib/grafana                    # 持久化用户、看板、插件等
+      - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro  # 预置数据源
+      - ./grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro      # 预置看板配置
+      - ./grafana/dashboards/:/var/lib/grafana/dashboards:ro                                 # 看板 JSON 目录
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_started  # tempo 未设置健康检查，采用 started 条件避免阻塞
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health > /dev/null 2>&1"]  # 健康检查
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # 日志采集（Promtail）
+  # - 自动发现所有 Docker 容器日志并推送到 Loki；持久化采集位点
+  promtail:
+    image: *promtail_image
+    container_name: promtail
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro       # 通过 Docker socket 做服务发现
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro  # 读取容器 JSON 日志
+      - promtail-data:/var/lib/promtail                    # 持久化 positions 文件
+      - ./promtail-config.yml:/etc/promtail/config.yml:ro  # 外置 promtail 配置
+    command: ["--config.file=/etc/promtail/config.yml"]
+    depends_on:
+      loki:
+        condition: service_healthy  # 等待 Loki 就绪再启动
+    restart: unless-stopped
+
+  # 日志采集（Fluent Bit）
+  fluentbit:
+    image: cr.fluentbit.io/fluent/fluent-bit:2.2
+    container_name: fluentbit
+    user: "0:0"
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./fluent-bit-parsers.conf:/fluent-bit/etc/fluent-bit-parsers.conf:ro
+    command: ["-c", "/fluent-bit/etc/fluent-bit.conf"]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+
+
+volumes:
+  loki-data: {}         # Loki 数据卷
+  tempo-data: {}        # Tempo 数据卷
+  grafana-data: {}      # Grafana 数据卷
+  prometheus-data: {}   # Prometheus 数据卷
+  promtail-data: {}     # Promtail 采集位点卷
+  clickhouse-data: {}   # ClickHouse 数据卷
