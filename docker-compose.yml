@@ -3,35 +3,9 @@ x-versions:  # 镜像版本统一在此管理,便于后续独立升级
   loki:       &loki_image       grafana/loki:3.5.8
   tempo:      &tempo_image      grafana/tempo:2.9.0
   grafana:    &grafana_image    grafana/grafana:12.2.1
-  promtail:   &promtail_image   grafana/promtail:3.5.8
-  clickhouse: &clickhouse_image clickhouse/clickhouse-server:25.10.1.3832
+  alloy:      &alloy_image      grafana/alloy:v1.10.0
 
 services:
-
-  # 列式数据库（ClickHouse）
-  # - 暴露 8123（HTTP）、9000（原生）；数据持久化到命名卷
-  clickhouse:
-    image: *clickhouse_image
-    container_name: clickhouse
-    restart: unless-stopped
-    environment:
-      CLICKHOUSE_USER: admin
-      CLICKHOUSE_PASSWORD: admin
-      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-    ports:
-      - "8123:8123"   # HTTP
-      - "9000:9000"   # Native
-      - "9363:9363"   # Prometheus metrics
-    volumes:
-      - clickhouse-data:/var/lib/clickhouse
-      - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
-      # 不再挂 users.d:ro，避免 entrypoint 需要写入时报只读错误
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
 
   # 指标采集与查询（Prometheus）
   # - 暴露 9090；保留期 90 天（2160h）；数据目录持久化至命名卷
@@ -47,7 +21,8 @@ services:
     command: [
       "--config.file=/etc/prometheus/prometheus.yml",
       "--storage.tsdb.path=/prometheus",
-      "--storage.tsdb.retention.time=2160h"
+      "--storage.tsdb.retention.time=2160h",
+      "--web.enable-remote-write-receiver"
     ]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/ready > /dev/null 2>&1"]  # 依赖镜像自带 wget；无则可改为 curl
@@ -81,7 +56,7 @@ services:
 
 
   # Trace 存储（Tempo）
-  # - 暴露 3200（查询）与 4318（OTLP HTTP 接收）；数据目录持久化；保留期已设 90 天
+  # - 暴露 3200（查询）；4317 仅供容器间通信（Alloy→Tempo）；数据目录持久化；保留期已设 90 天
   tempo:
     image: *tempo_image
     container_name: tempo
@@ -91,8 +66,9 @@ services:
       - tempo-data:/tmp/tempo                             # 持久化 Tempo 数据
     command: ["-config.file=/etc/tempo/tempo-local.yaml"]
     ports:
-      - "3200:3200"   # 查询 HTTP 端口
-      - "4318:4318"   # OTLP HTTP 采集端口（宿主机→容器）
+      - "3200:3200"   # 查询 HTTP 端口（对外暴露）
+    expose:
+      - "4317"        # OTLP gRPC 内部端口（仅供 Alloy 容器间通信，不暴露到宿主机）
     restart: unless-stopped
 
   # 可视化（Grafana）
@@ -112,7 +88,6 @@ services:
       - GF_TRACING_OPENTELEMETRY_SAMPLER_PARAM=1.0         # 全量采样，便于演示
 
       - OTEL_SERVICE_NAME=grafana
-      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource  # 安装 ClickHouse 数据源插件
     volumes:
       - ./grafana/custom.ini:/etc/grafana/grafana.ini:ro  # 覆盖默认 grafana.ini
       - grafana-data:/var/lib/grafana                    # 持久化用户、看板、插件等
@@ -129,8 +104,6 @@ services:
         condition: service_healthy
       tempo:
         condition: service_started  # tempo 未设置健康检查，采用 started 条件避免阻塞
-      clickhouse:
-        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health > /dev/null 2>&1"]  # 健康检查
       interval: 10s
@@ -138,75 +111,59 @@ services:
       retries: 10
       start_period: 20s
 
-  # 日志采集（Promtail）
-  # - 自动发现所有 Docker 容器日志并推送到 Loki；持久化采集位点
-  promtail:
-    image: *promtail_image
-    container_name: promtail
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro       # 通过 Docker socket 做服务发现
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro  # 读取容器 JSON 日志
-      - promtail-data:/var/lib/promtail                    # 持久化 positions 文件
-      - ./promtail-config.yml:/etc/promtail/config.yml:ro  # 外置 promtail 配置
-    command: ["--config.file=/etc/promtail/config.yml"]
-    depends_on:
-      loki:
-        condition: service_healthy  # 等待 Loki 就绪再启动
-    restart: unless-stopped
-
-
-  # 宿主机指标（Node Exporter）
+  # 宿主机 OS 指标采集（Node Exporter）
+  # - 采集宿主机 CPU、内存、磁盘、网络等 OS 级别指标
+  # - 暴露 9100 端口供 Alloy 抓取
   node-exporter:
     image: prom/node-exporter:latest
-    container_name: monitoring_node_exporter
-    # 不用 pid: host；通过显式挂载 /proc /sys / 再用 --path.* 指向宿主
+    container_name: node-exporter
+    ports:
+      - "9100:9100"
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
-      - /:/host:ro
-    command:
-      - --path.rootfs=/host
-      - --path.procfs=/host/proc
-      - --path.sysfs=/host/sys
-      # ↓ 可选：减少噪声/高基数
-      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+)($|/)
-      - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|mqueue|nsfs|overlay|proc|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$
-    expose:
-      - "9100"
-    restart: unless-stopped
-
-
-  # 容器级指标（cAdvisor）
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest      # 官方镜像位置
-    container_name: monitoring_cadvisor
-    volumes:
       - /:/rootfs:ro
-      - /var/run:/var/run:rw
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-      # - /dev/disk/:/dev/disk:ro               # 可选：需要磁盘/分区详情时再打开
-    expose:
-      - "8080"
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
     restart: unless-stopped
 
+  # 日志采集（Grafana Alloy）
+  # - 自动发现所有 Docker 容器日志并推送到 Loki
+  # - 采集 Prometheus 指标
+  # - OTLP 接收：4317/4318 用于外部应用推送，内部通过容器网络转发到 Tempo
+  alloy:
+    image: *alloy_image
+    container_name: alloy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro       # Docker 服务发现
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro  # 读取容器日志
+      - ./alloy-config.yaml:/etc/alloy/config.yaml:ro     # Alloy 配置
+      - alloy-data:/var/lib/alloy                         # 持久化位点数据
 
-  # 日志采集（Fluent Bit）
-  # fluentbit:
-  #   image: cr.fluentbit.io/fluent/fluent-bit:2.2
-  #   container_name: fluentbit
-  #   user: "0:0"
-  #   volumes:
-  #     - /var/lib/docker/containers:/var/lib/docker/containers:ro
-  #     - /var/run/docker.sock:/var/run/docker.sock:ro
-  #     - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
-  #     - ./parsers_custom.conf:/fluent-bit/etc/parsers_custom.conf:ro
-  #   command: ["-c", "/fluent-bit/etc/fluent-bit.conf"]
-  #   depends_on:
-  #     clickhouse:
-  #       condition: service_healthy
-  #   restart: unless-stopped
 
+      # 为宿主机 OS 指标准备的挂载
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver（外部应用推送追踪）
+      - "4318:4318"   # OTLP HTTP receiver（外部应用推送追踪）
+      - "12345:12345" # Alloy UI 和指标端口
+    command:
+      - run
+      - /etc/alloy/config.yaml
+      - --server.http.listen-addr=0.0.0.0:12345
+    depends_on:
+      loki:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+      tempo:
+        condition: service_started
+    restart: unless-stopped
 
 
 volumes:
@@ -214,5 +171,4 @@ volumes:
   tempo-data: {}        # Tempo 数据卷
   grafana-data: {}      # Grafana 数据卷
   prometheus-data: {}   # Prometheus 数据卷
-  promtail-data: {}     # Promtail 采集位点卷
-  clickhouse-data: {}   # ClickHouse 数据卷
+  alloy-data: {}        # Alloy 采集位点卷

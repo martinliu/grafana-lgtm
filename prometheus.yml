@@ -5,27 +5,7 @@ scrape_configs:
     static_configs:
       - targets: ['prometheus:9090']       # Scrape Prometheus itself so you have data even without OTEL
 
+  # 宿主机（node-exporter）
   - job_name: 'node_macos'
     static_configs:
       - targets: ['host.docker.internal:9100']    # Docker Desktop: scrape node_exporter running on host
-
-  - job_name: 'clickhouse'
-    static_configs:
-      - targets: ['clickhouse:9363'] # Scrape ClickHouse metrics endpoint
-    metrics_path: /metrics
-
-  # 宿主机（node-exporter）
-  - job_name: node
-    scrape_interval: 15s
-    static_configs:
-      - targets: ['node-exporter:9100']
-
-  # 容器（cAdvisor）
-  - job_name: cadvisor
-    scrape_interval: 15s
-    static_configs:
-      - targets: ['cadvisor:8080']
-    # 可选：去掉 Docker 标签，降低时序基数
-    metric_relabel_configs:
-      - action: labeldrop
-        regex: 'container_label_.*'

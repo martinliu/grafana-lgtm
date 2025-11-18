@@ -17,20 +17,3 @@ datasources:
     access: proxy
     url: http://tempo:3200
     isDefault: false
-
-  - name: clickhouse
-    type: grafana-clickhouse-datasource
-    access: proxy
-    isDefault: false
-    editable: true
-    jsonData:
-      server: clickhouse
-      port: 8123
-      protocol: http
-      username: grafana
-      tlsAuth: false
-      tlsSkipVerify: true
-      defaultDatabase: system
-      usePOST: true
-    secureJsonData:
-      password: "StrongPass123!"

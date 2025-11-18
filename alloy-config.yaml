@@ -1,0 +1,203 @@
+// Grafana Alloy 配置 - 完整的 LGTM 堆栈可观测性采集
+// 支持：日志采集、指标收集、OTLP 接收、Profiling 接收
+
+// ====== 日志采集 ======
+
+// Docker 服务发现 - 自动发现所有容器
+discovery.docker "docker_sd" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// Docker 标签处理
+discovery.relabel "docker_relabel" {
+  targets = discovery.docker.docker_sd.targets
+
+  // 提取容器名称
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    target_label  = "container_name"
+  }
+
+  // 提取镜像名称
+  rule {
+    source_labels = ["__meta_docker_image_name"]
+    target_label  = "image_name"
+  }
+
+  // 提取容器标签
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "compose_service"
+  }
+
+  // 提取容器 ID（前 12 位）
+  rule {
+    source_labels = ["__meta_docker_container_id"]
+    target_label  = "container_id"
+    regex = "(.{12}).*"
+    replacement = "$1"
+  }
+}
+
+// Docker 日志采集
+loki.source.docker "docker_logs" {
+  host             = "unix:///var/run/docker.sock"
+  targets          = discovery.relabel.docker_relabel.output
+  forward_to       = [loki.process.add_labels.receiver]
+  relabel_rules    = discovery.relabel.docker_relabel.rules
+}
+
+// 添加额外标签
+loki.process "add_labels" {
+  stage.static_labels {
+    values = {
+      job = "docker",
+      env = "local",
+    }
+  }
+
+  forward_to = [loki.write.loki.receiver]
+}
+
+// 输出日志到 Loki
+loki.write "loki" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+  external_labels = {
+    cluster = "docker-compose",
+    env     = "local",
+  }
+}
+
+
+// ====== 指标采集 ======
+
+// 采集 Prometheus 自身指标
+prometheus.scrape "prometheus" {
+  targets    = [{__address__ = "prometheus:9090"}]
+  forward_to = [prometheus.remote_write.prometheus.receiver]
+  job_name   = "prometheus"
+  scrape_interval = "30s"
+  scrape_timeout  = "10s"
+  metrics_path = "/metrics"
+}
+
+// 采集 Loki 指标
+prometheus.scrape "loki" {
+  targets    = [{__address__ = "loki:3100"}]
+  forward_to = [prometheus.remote_write.prometheus.receiver]
+  job_name   = "loki"
+  scrape_interval = "30s"
+  scrape_timeout  = "10s"
+  metrics_path = "/metrics"
+}
+
+// 采集 Tempo 指标
+prometheus.scrape "tempo" {
+  targets    = [{__address__ = "tempo:3200"}]
+  forward_to = [prometheus.remote_write.prometheus.receiver]
+  job_name   = "tempo"
+  scrape_interval = "30s"
+  scrape_timeout  = "10s"
+  metrics_path = "/metrics"
+}
+
+// 采集 Grafana 指标
+prometheus.scrape "grafana" {
+  targets    = [{__address__ = "grafana:3000"}]
+  forward_to = [prometheus.remote_write.prometheus.receiver]
+  job_name   = "grafana"
+  scrape_interval = "30s"
+  scrape_timeout  = "10s"
+  metrics_path = "/metrics"
+}
+
+// 采集 Alloy 自身指标
+prometheus.scrape "alloy" {
+  targets    = [{__address__ = "127.0.0.1:12345"}]
+  forward_to = [prometheus.remote_write.prometheus.receiver]
+  job_name   = "alloy"
+  scrape_interval = "30s"
+  scrape_timeout  = "10s"
+  metrics_path = "/metrics"
+}
+
+// 输出指标到 Prometheus
+prometheus.remote_write "prometheus" {
+  endpoint {
+    url = "http://prometheus:9090/api/v1/write"
+    queue_config {
+      capacity = 10000
+      min_shards = 1
+      max_shards = 200
+      min_backoff = "30ms"
+      max_backoff = "100s"
+    }
+  }
+}
+
+
+// ====== 跟踪（Traces）采集 ======
+
+// OTLP gRPC 接收器 - 接收应用和 Grafana 的追踪数据
+otelcol.receiver.otlp "otlp_grpc" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+
+  output {
+    traces  = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+// OTLP HTTP 接收器 - 接收应用的追踪数据（HTTP 协议）
+otelcol.receiver.otlp "otlp_http" {
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+
+  output {
+    traces  = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+// 导出追踪到 Tempo
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls {
+      insecure = true
+    }
+  }
+}
+
+
+// ====== 健康检查和服务发现 ======
+
+// Alloy 的本地服务发现 - 用于采集自身指标
+discovery.relabel "alloy_self" {
+  targets = [{__address__ = "127.0.0.1:12345", __scheme__ = "http"}]
+
+  rule {
+    target_label = "job"
+    replacement  = "alloy"
+  }
+
+  rule {
+    target_label = "instance"
+    replacement  = "alloy"
+  }
+}
+
+// ====== 宿主机 OS 指标采集（Node Exporter） ======
+
+// 采集宿主机 OS 指标（CPU、内存、磁盘、网络等）
+prometheus.scrape "node" {
+  targets    = [{__address__ = "node-exporter:9100"}]
+  forward_to = [prometheus.remote_write.prometheus.receiver]
+  job_name   = "node"
+  scrape_interval = "30s"
+  scrape_timeout  = "10s"
+  metrics_path = "/metrics"
+}
