@@ -1,10 +1,25 @@
+# 单租户 Demo（想多租户再把 multitenancy_enabled 改 true 并在请求头带 X-Scope-OrgID）
+multitenancy_enabled: false
+
+# 对外 HTTP 查询端口（3200）与内部 gRPC 端口（9095）
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+
+# 接收 OTLP（Grafana 或应用可直连），gRPC 4317 / HTTP 4318 都开放
 distributor:
   receivers:
     otlp:
       protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
         http:
-          endpoint: "0.0.0.0:4318"
+          endpoint: 0.0.0.0:4318
+  # 调试收包可打开：
+  # log_received_spans:
+  #   enabled: true
 
+# 本地存储（blocks + wal），适合单机/PoC
 storage:
   trace:
     backend: local
@@ -13,19 +28,55 @@ storage:
     wal:
       path: /tmp/tempo/wal
 
+# 写入策略（注意：replication_factor 在 ingester.lifecycler.ring 下）
 ingester:
   trace_idle_period: 30s
-  max_block_duration: "5m"
+  max_block_duration: 5m
   lifecycler:
     ring:
       kvstore:
-        store: inmemory
+        store: memberlist
       replication_factor: 1
 
+# 压缩与保留；也接入 memberlist ring
 compactor:
   compaction:
-    block_retention: 2160h   # keep traces for 90 days
+    block_retention: 2160h   # 90 天
+  ring:
+    kvstore:
+      store: memberlist
 
-querier: {}  # ⭐ Must be added, otherwise it will automatically exit
+# ⭐ 关键：开启 metrics-generator，并启用 span_metrics / service_graphs / local_blocks
+# - local_blocks：支持 TraceQL metrics（Explore/Drilldown 里的 rate() 等）
+# - service_graphs：服务依赖图
+metrics_generator:
+  ring:
+    kvstore:
+      store: memberlist
+  processor:
+    span_metrics: {}
+    service_graphs: {}
+    local_blocks: {}
+  # 若想把 metrics 写入 Prometheus（用于 RED 面板），再按需开启：
+  # storage:
+  #   remote_write:
+  #     - url: http://prometheus:9090/api/v1/write
+  #       send_exemplars: true
 
-multitenancy_enabled: false  # ⭐ Recommended to add, to avoid single-tenant environment errors
+# 覆盖项：对“所有租户”显式启用上述处理器（否则默认是关闭的）
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [local-blocks, service-graphs, span-metrics]
+
+# 查询组件（单进程下显式写出，避免被动退出）
+querier: {}
+query_frontend: {}
+
+# 单机 ring：memberlist 发现；加入自身（服务名与 Compose 保持一致）
+memberlist:
+  bind_addr:
+    - 0.0.0.0
+  bind_port: 7946
+  join_members:
+    - tempo:7946

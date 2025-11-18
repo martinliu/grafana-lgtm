@@ -18,7 +18,7 @@ datasources:
     url: http://tempo:3200
     isDefault: false
 
-  - name: clickhouse-http
+  - name: clickhouse
     type: grafana-clickhouse-datasource
     access: proxy
     isDefault: false
@@ -31,5 +31,6 @@ datasources:
       tlsAuth: false
       tlsSkipVerify: true
       defaultDatabase: system
+      usePOST: true
     secureJsonData:
       password: "StrongPass123!"

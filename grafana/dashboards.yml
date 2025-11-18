@@ -8,3 +8,9 @@ providers:
     updateIntervalSeconds: 5
     options:
       path: /var/lib/grafana/dashboards
+  - name: "ClickHouse Monitoring"
+    orgId: 1
+    folder: "ClickHouse"
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

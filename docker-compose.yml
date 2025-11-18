@@ -1,10 +1,10 @@
-x-versions:  # 镜像版本统一在此管理，便于后续独立升级
+x-versions:  # 镜像版本统一在此管理,便于后续独立升级
   prometheus: &prometheus_image prom/prometheus:v3.7.3
-  loki:       &loki_image       grafana/loki:3.5.7
+  loki:       &loki_image       grafana/loki:3.5.8
   tempo:      &tempo_image      grafana/tempo:2.9.0
   grafana:    &grafana_image    grafana/grafana:12.2.1
-  promtail:   &promtail_image   grafana/promtail:3.5.7
-  clickhouse: &clickhouse_image clickhouse/clickhouse-server:24.8
+  promtail:   &promtail_image   grafana/promtail:3.5.8
+  clickhouse: &clickhouse_image clickhouse/clickhouse-server:25.10.1.3832
 
 services:
 
@@ -13,29 +13,25 @@ services:
   clickhouse:
     image: *clickhouse_image
     container_name: clickhouse
-    platform: linux/arm64    # M1/Apple Silicon 建议显式声明
+    restart: unless-stopped
     environment:
-      - CLICKHOUSE_USER=admin                 # 建议改为自己的
-      - CLICKHOUSE_PASSWORD=admin_pass        # 建议改为强密码
-      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: admin
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ports:
       - "8123:8123"   # HTTP
       - "9000:9000"   # Native
-      - "9363:9363"   # Prometheus /metrics
+      - "9363:9363"   # Prometheus metrics
     volumes:
       - clickhouse-data:/var/lib/clickhouse
-      # 保持 config.d 只读没问题（放 prometheus.xml 的目录）
-      - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
-      # 关键：单独挂 users.d，必须可写（不要加 :ro）
-      - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/
-    restart: unless-stopped
+      - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      # 不再挂 users.d:ro，避免 entrypoint 需要写入时报只读错误
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
-
+      start_period: 15s
 
   # 指标采集与查询（Prometheus）
   # - 暴露 9090；保留期 90 天（2160h）；数据目录持久化至命名卷
@@ -65,20 +61,24 @@ services:
   loki:
     image: *loki_image
     container_name: loki
-    user: "0:0"  # 以 root 运行，便于写入本地数据目录
+    user: "0:0"
     volumes:
-      - ./loki-local-config.yaml:/etc/loki/local-config.yaml:ro  # 外置 Loki 配置
-      - loki-data:/tmp/loki                                     # 持久化 Loki 数据
-    command: -config.file=/etc/loki/local-config.yaml
+      - ./loki-local-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/tmp/loki
+    command:
+      - -config.file=/etc/loki/local-config.yaml
+      - -print-config-stderr
     ports:
       - "3100:3100"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready > /dev/null 2>&1"]  # 就绪探针
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready > /dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
+
+
 
   # Trace 存储（Tempo）
   # - 暴露 3200（查询）与 4318（OTLP HTTP 接收）；数据目录持久化；保留期已设 90 天
@@ -103,6 +103,15 @@ services:
     environment:
       - GF_SECURITY_ADMIN_USER=admin 
       - GF_SECURITY_ADMIN_PASSWORD=admin 
+
+      # —— Grafana → Tempo ——（重要）
+      - GF_TRACING_OPENTELEMETRY_OTLP_ADDRESS=tempo:4317   # gRPC，host:port；不要写 http://
+      - GF_TRACING_OPENTELEMETRY_OTLP_INSECURE=true        # 单机 Demo 直连即可
+      - GF_TRACING_OPENTELEMETRY_PROPAGATION=w3c           # 传播器（按需）
+      - GF_TRACING_OPENTELEMETRY_SAMPLER=parentbased_traceidratio
+      - GF_TRACING_OPENTELEMETRY_SAMPLER_PARAM=1.0         # 全量采样，便于演示
+
+      - OTEL_SERVICE_NAME=grafana
       - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource  # 安装 ClickHouse 数据源插件
     volumes:
       - ./grafana/custom.ini:/etc/grafana/grafana.ini:ro  # 覆盖默认 grafana.ini
@@ -144,6 +153,43 @@ services:
       loki:
         condition: service_healthy  # 等待 Loki 就绪再启动
     restart: unless-stopped
+
+
+  # 宿主机指标（Node Exporter）
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: monitoring_node_exporter
+    # 不用 pid: host；通过显式挂载 /proc /sys / 再用 --path.* 指向宿主
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host:ro
+    command:
+      - --path.rootfs=/host
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      # ↓ 可选：减少噪声/高基数
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+)($|/)
+      - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|mqueue|nsfs|overlay|proc|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$
+    expose:
+      - "9100"
+    restart: unless-stopped
+
+
+  # 容器级指标（cAdvisor）
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest      # 官方镜像位置
+    container_name: monitoring_cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      # - /dev/disk/:/dev/disk:ro               # 可选：需要磁盘/分区详情时再打开
+    expose:
+      - "8080"
+    restart: unless-stopped
+
 
   # 日志采集（Fluent Bit）
   # fluentbit:

@@ -1,11 +1,11 @@
-<!-- /opt/homebrew/etc/clickhouse-server/config.d/prometheus.xml -->
 <clickhouse>
+  <listen_host>0.0.0.0</listen_host>
   <prometheus>
     <endpoint>/metrics</endpoint>
     <port>9363</port>
     <metrics>true</metrics>
     <events>true</events>
     <asynchronous_metrics>true</asynchronous_metrics>
-    <status_info>true</status_info>
+    <errors>true</errors>
   </prometheus>
 </clickhouse>

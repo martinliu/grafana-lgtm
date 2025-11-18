@@ -1,5 +1,5 @@
 global:
-  scrape_interval: 5s            # Scraping interval, shortened to 5 seconds to get data faster (default is 1m)
+  scrape_interval: 15s            # Scraping interval, shortened to 5 seconds to get data faster (default is 1m)
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
@@ -9,7 +9,23 @@ scrape_configs:
     static_configs:
       - targets: ['host.docker.internal:9100']    # Docker Desktop: scrape node_exporter running on host
 
-  - job_name: 'pod_clickhouse'
+  - job_name: 'clickhouse'
     static_configs:
       - targets: ['clickhouse:9363'] # Scrape ClickHouse metrics endpoint
     metrics_path: /metrics
+
+  # 宿主机（node-exporter）
+  - job_name: node
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  # 容器（cAdvisor）
+  - job_name: cadvisor
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['cadvisor:8080']
+    # 可选：去掉 Docker 标签，降低时序基数
+    metric_relabel_configs:
+      - action: labeldrop
+        regex: 'container_label_.*'
