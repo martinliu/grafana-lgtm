@@ -1,11 +1,26 @@
 global:
   scrape_interval: 15s            # Scraping interval, shortened to 5 seconds to get data faster (default is 1m)
 scrape_configs:
+  # Prometheus 自身指标采集 - 直接采集（此外其他指标采集由 Alloy 通过 remote_write 推送）
   - job_name: 'prometheus'
     static_configs:
-      - targets: ['prometheus:9090']       # Scrape Prometheus itself so you have data even without OTEL
+      - targets: ['prometheus:9090']
 
-  # 宿主机（node-exporter）
-  - job_name: 'node_macos'
-    static_configs:
-      - targets: ['host.docker.internal:9100']    # Docker Desktop: scrape node_exporter running on host
+  # 以下采集任务已注销，由 Alloy 统一管理所有指标采集
+  # - job_name: 'node_macos'
+  #   static_configs:
+  #     - targets: ['host.docker.internal:9100']
+
+  # - job_name: 'grafana'
+  #   static_configs:
+  #     - targets: ['grafana:3000']
+
+  # - job_name: 'tempo'
+  #   static_configs:
+  #     - targets: ['tempo:3200']
+  #   metrics_path: '/metrics'
+
+  # - job_name: 'loki'
+  #   static_configs:
+  #     - targets: ['loki:3100']
+  #   metrics_path: '/metrics'

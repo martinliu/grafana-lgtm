@@ -73,16 +73,6 @@ loki.write "loki" {
 
 // ====== 指标采集 ======
 
-// 采集 Prometheus 自身指标
-prometheus.scrape "prometheus" {
-  targets    = [{__address__ = "prometheus:9090"}]
-  forward_to = [prometheus.remote_write.prometheus.receiver]
-  job_name   = "prometheus"
-  scrape_interval = "30s"
-  scrape_timeout  = "10s"
-  metrics_path = "/metrics"
-}
-
 // 采集 Loki 指标
 prometheus.scrape "loki" {
   targets    = [{__address__ = "loki:3100"}]
